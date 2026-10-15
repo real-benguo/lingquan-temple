@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { makeTextures, MAT_TEX } from './textures.js';
 
 // ------------------------------------------------------------------ 常量
 const EYE = 1.66;          // 眼高
@@ -23,30 +25,75 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xbfd0dd, 70, 340);
+scene.fog = new THREE.Fog(0xd7e2ee, 90, 430);
 
 const camera = new THREE.PerspectiveCamera(74, innerWidth / innerHeight, 0.1, 1200);
 
 // ------------------------------------------------------------------ 天空
+const SUN_DIR = new THREE.Vector3(78, 118, 62).normalize();
+const skyUniforms = {
+  cTop: { value: new THREE.Color(0x3f7fc4) },
+  cMid: { value: new THREE.Color(0xcfe2f2) },
+  cLow: { value: new THREE.Color(0xe6dfd0) },
+  sunDir: { value: SUN_DIR.clone() },
+  sunCol: { value: new THREE.Color(0xfff4dc) },
+  uTime: { value: 0 }
+};
 const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide,
   depthWrite: false,
-  uniforms: {
-    cTop: { value: new THREE.Color(0x2f6fb5) },
-    cMid: { value: new THREE.Color(0xb9d3ea) },
-    cLow: { value: new THREE.Color(0xd9d2c4) }
-  },
-  vertexShader: `varying vec3 vP;
-    void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-  fragmentShader: `uniform vec3 cTop,cMid,cLow; varying vec3 vP;
+  fog: false,
+  uniforms: skyUniforms,
+  vertexShader: `
+    varying vec3 vDir;
     void main(){
-      float h = normalize(vP).y;
-      vec3 c = mix(cLow, cMid, smoothstep(-0.05, 0.28, h));
-      c = mix(c, cTop, smoothstep(0.16, 0.82, h));
-      gl_FragColor = vec4(c, 1.0);
+      vDir = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }`,
+  fragmentShader: `
+    uniform vec3 cTop, cMid, cLow, sunCol, sunDir;
+    uniform float uTime;
+    varying vec3 vDir;
+
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123); }
+    float vnoise(vec2 p){
+      vec2 i = floor(p), f = fract(p);
+      f = f * f * (3.0 - 2.0 * f);
+      float a = hash(i), b = hash(i + vec2(1.0, 0.0));
+      float c = hash(i + vec2(0.0, 1.0)), d = hash(i + vec2(1.0, 1.0));
+      return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    }
+    float fbm(vec2 p){
+      float s = 0.0, a = 0.5;
+      for (int i = 0; i < 5; i++){ s += a * vnoise(p); p *= 2.03; a *= 0.5; }
+      return s;
+    }
+
+    void main(){
+      vec3 d = normalize(vDir);
+      float h = d.y;
+      vec3 c = mix(cLow, cMid, smoothstep(-0.05, 0.30, h));
+      c = mix(c, cTop, smoothstep(0.16, 0.86, h));
+
+      // 云
+      vec2 uv = d.xz / max(abs(d.y) + 0.10, 0.10) * 0.16;
+      uv += vec2(uTime * 0.0035, uTime * 0.0014);
+      float cl = fbm(uv * 1.6 + 3.0);
+      cl = smoothstep(0.50, 0.82, cl);
+      float cover = smoothstep(0.015, 0.22, h) * (1.0 - smoothstep(0.50, 0.95, h));
+      c = mix(c, vec3(1.0, 0.99, 0.97), cl * cover * 0.70);
+
+      // 太阳与光晕
+      float sd = max(dot(d, normalize(sunDir)), 0.0);
+      c += sunCol * pow(sd, 400.0) * 2.2;
+      c += sunCol * pow(sd, 9.0) * 0.14;
+
+      gl_FragColor = vec4(pow(max(c, 0.0), vec3(0.4545)), 1.0);
     }`
 });
-scene.add(new THREE.Mesh(new THREE.SphereGeometry(700, 32, 18), skyMat));
+const skyDome = new THREE.Mesh(new THREE.SphereGeometry(700, 48, 28), skyMat);
+skyDome.frustumCulled = false;
+scene.add(skyDome);
 
 // ------------------------------------------------------------------ 环境反射
 (function buildEnv() {
@@ -82,9 +129,12 @@ scene.add(sun, sun.target);
 const SUN_OFF = new THREE.Vector3(78, 118, 62);
 
 // 殿内补光（不投影，纯照亮内部）
-[[0, 7.5, -11, 70, 78], [0, 5.0, 33, 42, 52], [0, 5.5, 66, 34, 48],
- [0, 6.5, -73, 42, 56], [30, 4.5, 16, 24, 40], [-30, 4.5, 16, 24, 40],
- [54, 5.0, -22, 28, 46]].forEach(([x, y, z, i, d]) => {
+[[0, 6.5, -4, 190, 64], [0, 6.5, -19, 190, 64],
+ [0, 4.8, 33, 130, 52], [0, 4.8, 40, 90, 44],
+ [0, 5.2, 66, 110, 50], [0, 5.2, 71, 80, 42],
+ [0, 6.0, -70, 150, 58], [0, 6.0, -76, 110, 50],
+ [30, 4.2, 16, 80, 42], [-30, 4.2, 16, 80, 42],
+ [54, 4.5, -22, 90, 46]].forEach(([x, y, z, i, d]) => {
   const pl = new THREE.PointLight(0xffdcae, i, d, 1.5);
   pl.position.set(x, y, z);
   scene.add(pl);
@@ -92,22 +142,61 @@ const SUN_OFF = new THREE.Vector3(78, 118, 62);
 
 // ------------------------------------------------------------------ 控制
 const controls = new PointerLockControls(camera, renderer.domElement);
+controls.pointerSpeed = 0.8;
 const keys = Object.create(null);
 let locked = false;
+let dragMode = false;      // 指针锁定不可用时兜底：按住左键拖动转视角
+let dragging = false;
 
 const overlay = document.getElementById('overlay');
 const loading = document.getElementById('loading');
+const enterBtn = document.getElementById('enter');
+const hudEl = document.getElementById('hud');
 
-document.getElementById('enter').addEventListener('click', () => controls.lock());
-controls.addEventListener('lock', () => {
+function startPlay() {
   locked = true;
   overlay.classList.add('hide');
   document.body.classList.add('playing');
+}
+
+function enableDragMode() {
+  if (dragMode) return;
+  dragMode = true;
+  startPlay();
+  if (hudEl) {
+    hudEl.insertAdjacentHTML('afterbegin',
+      '<span style="color:#e8c574"><b>按住左键拖动</b> 转视角</span>');
+  }
+}
+
+enterBtn.addEventListener('click', () => {
+  try { controls.lock(); } catch (e) { enableDragMode(); }
+  setTimeout(() => { if (!locked && !dragMode) enableDragMode(); }, 700);
 });
+
+document.addEventListener('pointerlockerror', enableDragMode);
+
+controls.addEventListener('lock', () => { if (!dragMode) startPlay(); });
 controls.addEventListener('unlock', () => {
+  if (dragMode) return;
   locked = false;
   overlay.classList.remove('hide');
   document.body.classList.remove('playing');
+});
+
+// 拖动兜底
+const _dragEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+renderer.domElement.addEventListener('mousedown', (e) => {
+  if (dragMode && e.button === 0) dragging = true;
+});
+addEventListener('mouseup', () => { dragging = false; });
+addEventListener('mousemove', (e) => {
+  if (!dragMode || !dragging) return;
+  _dragEuler.setFromQuaternion(camera.quaternion);
+  _dragEuler.y -= (e.movementX || 0) * 0.0022;
+  _dragEuler.x -= (e.movementY || 0) * 0.0022;
+  _dragEuler.x = Math.max(-1.52, Math.min(1.52, _dragEuler.x));
+  camera.quaternion.setFromEuler(_dragEuler);
 });
 
 addEventListener('keydown', (e) => {
@@ -174,6 +263,9 @@ function canStand(p) {
 const bar = document.getElementById('barfill');
 const loadtxt = document.getElementById('loadtxt');
 const loader = new GLTFLoader();
+const draco = new DRACOLoader();
+draco.setDecoderPath('./lib/draco/');
+loader.setDRACOLoader(draco);
 
 Promise.all([
   new Promise((res, rej) => loader.load('./assets/temple.glb', res,
@@ -181,13 +273,33 @@ Promise.all([
   fetch('./assets/temple_data.json').then(r => r.json())
 ]).then(([gltf, data]) => {
   const root = gltf.scene;
+  const texs = makeTextures();
+  const bumpCache = {};
   root.traverse(o => {
-    if (o.isMesh) {
-      o.castShadow = true;
-      o.receiveShadow = true;
-      o.material.envMapIntensity = 0.85;
-      o.frustumCulled = true;
+    if (!o.isMesh) return;
+    o.castShadow = true;
+    o.receiveShadow = true;
+    o.frustumCulled = true;
+    const m = o.material;
+    if (!m) return;
+    const conf = MAT_TEX[m.name];
+    if (conf) {
+      const [key, bumpScale] = conf;
+      const t = texs[key];
+      if (t) {
+        if (!bumpCache[key]) {
+          const b = t.clone();
+          b.colorSpace = THREE.NoColorSpace;
+          b.needsUpdate = true;
+          bumpCache[key] = b;
+        }
+        m.map = t;
+        m.bumpMap = bumpCache[key];
+        m.bumpScale = bumpScale;
+        m.needsUpdate = true;
+      }
     }
+    m.envMapIntensity = 0.9;
   });
   scene.add(root);
 
@@ -243,10 +355,12 @@ function tick() {
   const targetY = curGround + EYE;
   camera.position.y += (targetY - camera.position.y) * Math.min(1, dt * GRAVITY_SMOOTH);
 
-  // 阴影相机跟随
+  // 阴影相机跟随 + 天空跟随
   sun.position.copy(camera.position).add(SUN_OFF);
   sun.target.position.set(camera.position.x, 0, camera.position.z);
   sun.target.updateMatrixWorld();
+  skyDome.position.copy(camera.position);
+  skyUniforms.uTime.value = clock.elapsedTime;
 
   renderer.render(scene, camera);
 }
@@ -273,5 +387,13 @@ window.__temple = {
     ground: +curGround.toFixed(2),
     rot: [+camera.rotation.y.toFixed(2), +camera.rotation.x.toFixed(2)],
     colliders: COLLIDERS.length, platforms: PLATFORMS.length, ramps: RAMPS.length
-  })
+  }),
+  blockedAt: (x, z) => {
+    for (let i = 0; i < COLLIDERS.length; i++) {
+      const c = COLLIDERS[i];
+      if (x > c.x0 - RADIUS && x < c.x1 + RADIUS &&
+          z > c.z0 - RADIUS && z < c.z1 + RADIUS) return true;
+    }
+    return false;
+  }
 };
